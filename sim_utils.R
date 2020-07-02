@@ -61,12 +61,13 @@ bootstrap.sim <- function(M=1e3, N=1e2,
                           alpha=0, beta=1, gamma=1,
                           rho=0.5, rho_g=0.7,
                           mu_dir=0, sd_dir=1, mu_nur=0, sd_nur=NULL, 
-                          sd_ind=1, sd_fam=1,
-                          het = 'none'
-                          ){
+                          sd_ind=1, sd_fam=1, het = 'none'){
   require(tidyverse)
   
-  d <- sim.phen(N=N)
+  d <- sim.phen(N=N, alpha=alpha, beta=beta, gamma=gamma,
+                rho=rho, rho_g=rho_g,
+                mu_dir=mu_dir, sd_dir=sd_dir, mu_nur=mu_nur, sd_nur=sd_nur, 
+                sd_ind=sd_ind, sd_fam=sd_fam, het=het)
   
   d$delta_g <- d$g_d1 - d$g_d0
   d$delta_Y <- d$Y1 - d$Y0
@@ -110,6 +111,6 @@ bootstrap.sim <- function(M=1e3, N=1e2,
     geom_density(alpha = 0.6) +
     theme_bw()
   print(summary)
-  out <- list(betas=betas, summary=summary, plot=plot)
+  out <- list(data=d, betas=betas, summary=summary, plot=plot)
   return(out)
 }

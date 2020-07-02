@@ -12,7 +12,8 @@ out <- bootstrap.sim(M=1e3, N=1e2, # bootstrap iterations and observations
                      het = 'none' # heteroskedasticity form
 )
 
-# the out object contains the betas, a summary of the ses, and a plot
+# the out object contains the data, the betas, a summary of the ses, and a plot
+out$data
 out$betas
 out$summary
 out$plot
@@ -21,7 +22,7 @@ out$plot
 out <- bootstrap.sim(M=1e4, N=1e3, het='full')
 # you can also add stuff to the plot
 out$plot + 
-  labs(x='Beta Hat', y='Density', title='PD is less efficient') +
+  labs(x='Beta Hat', y='Density', title='This is weird!') +
   scale_fill_manual(values=c('FE' = 'cornflowerblue',
                              'PD' = 'darkgreen',
                              'PD_full' = 'darkorchid')) +
