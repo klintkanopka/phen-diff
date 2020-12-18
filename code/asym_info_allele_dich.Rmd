@@ -1,0 +1,472 @@
+---
+title: "Investigating How Phenotype Differences Handles Information Asymmetry With Multiple Siblings"
+author: "Klint Kanopka"
+date: "10/19/2020"
+output: pdf_document
+---
+
+Load `MASS` before you load `dplyr` or `tidyverse`, or else things get weird with the `select()` function.
+
+```{r setup, results='hide', message=FALSE, warning=FALSE}
+library(tidyverse)
+library(parallel)
+```
+
+# Simulation Function
+
+## Simulating genetic data
+
+We first focus on a single trait. Note that in the simulation function, $N$ specifies the number of *families*. For the $j$th family, we draw parental phenotypes $g_{jm}, g_{jp} \in \{0,1,2\}$ such that
+
+$$g_{jm} \sim \text{Binomial}(2, p_{allele})$$
+Where $p_{allele}$ is the prevalence of the allele in the parent's generation. Note that $g_{jp}$ is drawn the same way. This can be specified in the simulation function. Next, for the genotype of each of the three siblings birthed of these parents $(g_{ij}\in\{0,1,2\}\text{, where } i\in\{0,1,2\})$, one allele is drawn from each parent at random such that
+
+$$g_{ij} \sim \text{Bernoulli}\bigg(\frac{g_{jm}}{2}\bigg) + \text{Bernoulli}\bigg(\frac{g_{jp}}{2}\bigg)$$
+
+## Simulating phenotypes
+
+The `sim.data()` function allows for specifying the relative magnitudes of the direct genetic effect, $\beta$, a pooled family-level genetic and environmental effect, $\gamma_1$, and the individual error term, $\gamma_2$. We specify these three coefficients instead of specifying standard deviations for the $\varepsilon_j$ and $\varepsilon_{ij}$ terms for simplicity.
+
+This function simulates a dichotomous phenotype, $Y_{ij}$, for three siblings, $i \in \{0,1,2\}$. Note that sibling $i=0$ is taken to be the genotyped sibling, though genotypes are generated for each sibling under the hood. Dichotomization is done by doing Bernoulli draws for each sibling where
+
+$$Y_{ij} \sim \text{Bernoulli}(p_{ij})$$
+where
+
+$$p_{ij} = \sigma \big(\alpha + \beta g_{ij} + \gamma_1 \varepsilon_j + \gamma_2 \varepsilon_{ij}\big) $$
+Where $i$ indexes siblings, $j$ indexes families and $\sigma(\cdot)$ is the standard logistic sigmoid. Note that in the simulations that follow, we will not estimate $\beta$ directly - but instead fit a linear probability model to the simulated data. 
+
+```{r simulation_function}
+sim.data <- function(N=1e5, rho=0.5, rho_g=0.3, p_allele=0.3, 
+                     alpha=-1, beta=sqrt(0.0001), gamma_1=sqrt(0.35),   gamma_2=sqrt(0.6499),
+                     continuous=FALSE){
+
+  sim.genes <- function(N=N, rho=rho, rho_g=rho_g, p_allele=p_allele){
+    g_m <- rbinom(n=N, size=2, prob=p_allele)
+    g_p <- rbinom(n=N, size=2, prob=p_allele)
+
+    out <- data.frame(g_m = g_m, 
+                      g_p = g_p,
+                      g0 = rbinom(N, 1, g_m/2) + rbinom(N, 1, g_p/2),
+                      g1 = rbinom(N, 1, g_m/2) + rbinom(N, 1, g_p/2),
+                      g2 = rbinom(N, 1, g_m/2) + rbinom(N, 1, g_p/2),
+                      eps_fam = rnorm(N))
+    return(out)
+  }
+
+  sigmoid <- function(z){
+    out <- 1 / (1 + exp(-z))
+  }
+
+  a <- rep(alpha, N)
+  b <- rep(beta, N)
+
+  d <- sim.genes(N=N, rho=rho, rho_g=rho_g, p_allele=p_allele)
+  
+  if (continuous){
+    d$Y0 <- a + b*d$g0 + gamma_1*d$eps_fam + gamma_2*rnorm(N)
+    d$Y1 <- a + b*d$g1 + gamma_1*d$eps_fam + gamma_2*rnorm(N)
+    d$Y2 <- a + b*d$g2 + gamma_1*d$eps_fam + gamma_2*rnorm(N)
+  } else {
+    d$p0 <- sigmoid(a + b*d$g0 + gamma_1*d$eps_fam + gamma_2*rnorm(N))
+    d$p1 <- sigmoid(a + b*d$g1 + gamma_1*d$eps_fam + gamma_2*rnorm(N))
+    d$p2 <- sigmoid(a + b*d$g2 + gamma_1*d$eps_fam + gamma_2*rnorm(N))
+  
+    d$Y0 <- rbinom(N, 1, d$p0)
+    d$Y1 <- rbinom(N, 1, d$p1)
+    d$Y2 <- rbinom(N, 1, d$p2)
+  }
+  return(d)
+}
+```
+
+
+# A Fast Comparison of Vanilla OLS, Fixed-Effects, and Phenotype Differences
+
+If we want to estimate the effect of a genotype, $g$ on $Y$, we can use data from genotyped siblings and run a regression. This has the downside of being biased due to the presence of omitted variables (specifically at the family level) that are correlated with both our predictors and the outcome. 
+
+```{r ols}
+set.seed(8675309)
+d <- sim.data(continuous=TRUE)
+m_ols <- lm(Y0 ~ g0, data = d)
+summary(m_ols)
+ols_est <- coef(m_ols)[2]
+```
+
+A fixed effects regression gets around this. Here I use genotype data from all three simulated siblings to give our best estimate of the effect we are looking to recover:
+
+```{r fe}
+# apply within transformation
+fe_d <- data.frame(
+  Y = c(d$Y0, d$Y1, d$Y2),
+  g = c(d$g0, d$g1, d$g2),
+  family = rep(1:nrow(d), 3)) %>% 
+  group_by(family) %>% 
+  mutate(Y_bar = mean(Y),
+         g_bar = mean(g)) %>% 
+  ungroup() %>% 
+  transmute(Y = Y - Y_bar,
+            g = g - g_bar)
+
+m_fe <- lm(Y ~ g, data = fe_d)
+summary(m_fe)
+fe_est <- coef(m_fe)[2]
+```
+
+Unfortunately, it is not always the case that we have sets of siblings that are all genotyped. Here is where phenotype differences methods are helpful, as they are (theoretically) unbiased when we observe two phenotypes within the same family and only one genotyped sibling. Note that here, PD does not appear to recover the correct estimates.
+
+```{r}
+d <- d %>% 
+  select(g0, Y0, Y1, Y2) %>% 
+  mutate(g = 0.5 * g0,
+         keep = 1 - max(Y1, Y2),
+         delta_1 = Y0 - Y1,
+         delta_2 = Y0 - Y2,
+         delta_max = Y0 - max(Y1, Y2))
+
+m1 <- lm(delta_1 ~ g, data = d)
+m2 <- lm(delta_2 ~ g, data = d)
+summary(m1)
+summary(m2)
+```
+
+
+# A Motivating Example
+
+Next imagine the case where there are three phenotyped siblings and we ask the genotyped sibling, "Do either of your siblings have phenotype $Y$?" Some data in the UKB is collected this way. Additionally, it is easy to imagine a selection design that does this implicitly - providing us with a nonrandom phenotyped sibling. As one would expect, this case provides an estimate of the direct genetic effect that is biased:
+
+```{r}
+m3 <- lm(delta_max ~ g, data = d)
+summary(m3)
+max_est <- coef(m3)[2]
+```
+
+We will use a ratio to quantify the amount of bias in the PD estimate relative to the OLS estimate. Specifically:
+
+$$ R = \frac{\hat{\beta}_{PD} - \hat{\beta}_{FE}}{\hat{\beta}_{OLS} - \hat{\beta}_{FE}} $$
+
+Note that here, the value of our ratio is $R=$ `r round((max_est - fe_est)/(ols_est - fe_est), 3)`, signaling that PD does much worse than OLS in this case.  
+
+# Bias as a Function of Phenotype Prevalence
+
+First we run a simulation to see how this bias ratio responds as a function of phenotype prevalence. Note that, here, the phenotype difference that forms the dependent variable is:
+
+$$ PD = Y_0 - \max(Y_1, Y_2) $$
+
+```{r prev_sim_max, cache=TRUE}
+
+sim.rep <- function(alpha){
+  d_sim <- sim.data(alpha=alpha, 
+                    beta=sqrt(0.0001), 
+                    gamma_1=sqrt(0.35), 
+                    gamma_2=sqrt(0.6499))
+  prevalence <- mean(d_sim$Y0)
+  
+  fe_d <- data.frame(Y = c(d_sim$Y0, d_sim$Y1, d_sim$Y2),
+                     g = c(d_sim$g0, d_sim$g1, d_sim$g2),
+                     family = rep(1:nrow(d_sim), 3)) %>% 
+    group_by(family) %>% 
+    mutate(Y_bar = mean(Y),
+           g_bar = mean(g)) %>% 
+    ungroup() %>% 
+    transmute(Y = Y - Y_bar,
+              g = g - g_bar)
+      
+  m_ols <- lm(Y0 ~ g0, data=d_sim)
+  ols_est <- coef(m_ols)[2]
+
+  m_sim_fe <- lm(Y ~ g, data = fe_d)
+  fe_est <- coef(m_sim_fe)[2]
+  
+  d_sim <- d_sim %>%  
+    transmute(g = 0.5 * g0,
+              delta_max = Y0 - max(Y1,Y2))
+  m_sim_pd <- lm(delta_max ~ g, data = d_sim)
+  max_est <- coef(m_sim_pd)[2]
+  
+    
+  ratio <- (max_est - fe_est)/(ols_est - fe_est)
+  output <- c(alpha=alpha, prevalence=prevalence, ratio=ratio)
+  return(output)
+}
+
+alphas <- rep(seq(-4, -1, by=0.1), 100)
+
+n_cores <- detectCores() - 1
+cl <- makeCluster(n_cores, type='FORK')
+sim_results <- as.data.frame(t(parSapply(cl, alphas, sim.rep)))
+stopCluster(cl)
+
+ggplot(sim_results, aes(x = prevalence, y = ratio.g)) +
+  geom_point(alpha = 0.1) +
+  geom_smooth(method = 'loess', formula=y~x) +
+  labs(y='Bias Ratio',
+       x='Phenotype Prevalence',
+       title='PD bias when using max sibling phenotype') +
+  scale_y_continuous(limits=c(-10, 10)) +
+  theme_bw()
+```
+
+# Exploring Improvements
+
+## Using mean sibling phenotype
+
+Were we to have complete information about both sibling phenotypes, we could use the mean sibling phenotype and modify our phenotype difference to be:
+
+$$ PD = Y_0 - \frac{Y_1 + Y_2}{2} $$
+
+```{r prev_sim, cache=TRUE}
+
+sim.rep <- function(alpha){
+  d_sim <- sim.data(alpha=alpha,
+                    beta=sqrt(0.0001), 
+                    gamma_1=sqrt(0.35), 
+                    gamma_2=sqrt(0.6499))
+  prevalence <- mean(d_sim$Y0)
+  
+  fe_d <- data.frame(Y = c(d_sim$Y0, d_sim$Y1, d_sim$Y2),
+                     g = c(d_sim$g0, d_sim$g1, d_sim$g2),
+                     family = rep(1:nrow(d_sim), 3)) %>% 
+    group_by(family) %>% 
+    mutate(Y_bar = mean(Y),
+           g_bar = mean(g)) %>% 
+    ungroup() %>% 
+    transmute(Y = Y - Y_bar,
+              g = g - g_bar)
+      
+  m_ols <- lm(Y0 ~ g0, data=d_sim)
+  ols_est <- coef(m_ols)[2]
+
+  m_sim_fe <- lm(Y ~ g, data = fe_d)
+  fe_est <- coef(m_sim_fe)[2]
+  
+  d_sim <- d_sim %>%  
+    transmute(g = 0.5 * g0,
+              delta_mean = Y0 - (Y1+Y2)/2)
+  m_sim_pd <- lm(delta_mean ~ g, data = d_sim)
+  mean_est <- coef(m_sim_pd)[2]
+    
+  ratio <- (max_est - fe_est)/(ols_est - fe_est)
+  output <- c(alpha=alpha, prevalence=prevalence, ratio=ratio)
+  return(output)
+}
+
+alphas <- rep(seq(-4, -1, by=0.1), 100)
+
+n_cores <- detectCores() - 1
+cl <- makeCluster(n_cores, type='FORK')
+sim_results <- as.data.frame(t(parSapply(cl, alphas, sim.rep)))
+stopCluster(cl)
+
+ggplot(sim_results, aes(x = prevalence, y = ratio.g)) +
+  geom_point(alpha = 0.1) +
+  geom_smooth(method = 'loess', formula=y~x) +
+  labs(y='Bias Ratio',
+       x='Phenotype Prevalence',
+       title='PD bias when using mean sibling phenotype') +
+  scale_y_continuous(limits=c(-10, 10)) +
+  theme_bw()
+```
+
+
+Here we see this fixes the bias problem, but requires more information than our motivating example provides. Specifically, when the max phenotype is zero, we know that $Y_1 = Y_2 = 0$. We can make no such sure statement when $\max(Y_1,Y_2) = 1$. Next we try three different strategies for resolving this problem.
+
+## Adjust the sibling phenotypes by a fixed amount
+
+Here, we adjust sibling phenotypes by a factor of $0.5$. This makes our phenotype difference:
+
+$$ PD = Y_0 - \frac{\max(Y_1, Y_2)}{2} $$
+
+Given the approaches above, this assumes that there are only two cases for the siblings: Both siblings have phenotype zero, or one sibling has phenotype zero.
+
+```{r prev_sim_max_2, cache=TRUE}
+
+sim.rep <- function(alpha){
+  d_sim <- sim.data(alpha=alpha,
+                    beta=sqrt(0.0001), 
+                    gamma_1=sqrt(0.35), 
+                    gamma_2=sqrt(0.6499))
+  prevalence <- mean(d_sim$Y0)
+  
+  fe_d <- data.frame(Y = c(d_sim$Y0, d_sim$Y1, d_sim$Y2),
+                     g = c(d_sim$g0, d_sim$g1, d_sim$g2),
+                     family = rep(1:nrow(d_sim), 3)) %>% 
+    group_by(family) %>% 
+    mutate(Y_bar = mean(Y),
+           g_bar = mean(g)) %>% 
+    ungroup() %>% 
+    transmute(Y = Y - Y_bar,
+              g = g - g_bar)
+      
+  m_ols <- lm(Y0 ~ g0, data=d_sim)
+  ols_est <- coef(m_ols)[2]
+
+  m_sim_fe <- lm(Y ~ g, data = fe_d)
+  fe_est <- coef(m_sim_fe)[2]
+  
+  d_sim <- d_sim %>%  
+    transmute(g = 0.5 * g0,
+              delta_max = Y0 - 0.5*max(Y1,Y2))
+  m_sim_pd <- lm(delta_max ~ g, data = d_sim)
+  max_est <- coef(m_sim_pd)[2]
+  
+  ratio <- (max_est - fe_est)/(ols_est - fe_est)
+  output <- c(alpha=alpha, prevalence=prevalence, ratio=ratio)
+  return(output)
+}
+
+alphas <- rep(seq(-4, -1, by=0.1), 100)
+
+n_cores <- detectCores() - 1
+cl <- makeCluster(n_cores, type='FORK')
+sim_results <- as.data.frame(t(parSapply(cl, alphas, sim.rep)))
+stopCluster(cl)
+
+ggplot(sim_results, aes(x = prevalence, y = ratio.g)) +
+  geom_point(alpha = 0.1) +
+  geom_smooth(method = 'loess', formula=y~x) +
+  labs(y='Bias Ratio',
+       x='Phenotype Prevalence',
+       title='PD bias when weighting max sibling phenotype by 0.5') +
+  scale_y_continuous(limits=c(-10, 10)) +
+  theme_bw()
+```
+
+This appears to shrink PD bias slightly compared to just using the maximum phenotype, but not by much.
+
+## Scale by an estimate of the phenotype prevalence
+
+Here we apply a little bit of trickery. We start by estimating $P\big(Y_0 = 1 | \max(Y_1, Y_2) = 1\big)$. We take this as our best guess at phenotype prevalence within these families. We then adjust our phenotype difference to be:
+
+$$ PD = Y_0 - \frac{1 + P\big(Y_0=1|\max(Y_1, Y_2)=1\big)}{2} \max(Y_1,Y_2)$$
+
+
+```{r prev_sim_max_3, cache=TRUE}
+sim.rep <- function(alpha){
+  d_sim <- sim.data(alpha=alpha,
+                    beta=sqrt(0.0001), 
+                    gamma_1=sqrt(0.35), 
+                    gamma_2=sqrt(0.6499))
+  prevalence <- mean(d_sim$Y0)
+  
+  fe_d <- data.frame(Y = c(d_sim$Y0, d_sim$Y1, d_sim$Y2),
+                     g = c(d_sim$g0, d_sim$g1, d_sim$g2),
+                     family = rep(1:nrow(d_sim), 3)) %>% 
+    group_by(family) %>% 
+    mutate(Y_bar = mean(Y),
+           g_bar = mean(g)) %>% 
+    ungroup() %>% 
+    transmute(Y = Y - Y_bar,
+              g = g - g_bar)
+      
+  m_ols <- lm(Y0 ~ g0, data=d_sim)
+  ols_est <- coef(m_ols)[2]
+
+  m_sim_fe <- lm(Y ~ g, data = fe_d)
+  fe_est <- coef(m_sim_fe)[2]
+  
+  d_sim <- d_sim %>%  
+    transmute(g = 0.5 * g0,
+              Y0 = Y0,
+              max_Y = max(Y1,Y2))
+  
+  p_est <- mean(d_sim$Y0[d_sim$max_Y == 1])
+  d_sim$max_Y = 0.5*(1+p_est)*d_sim$max_Y
+      
+  d_sim <- d_sim %>% 
+    mutate(delta_max = Y0 - max_Y)
+
+  m_sim_pd <- lm(delta_max ~ g, data = d_sim)
+  max_est <- coef(m_sim_pd)[2]
+  
+  ratio <- (max_est - fe_est)/(ols_est - fe_est)
+  output <- c(alpha=alpha, prevalence=prevalence, ratio=ratio)
+  return(output)
+}
+
+alphas <- rep(seq(-4, -1, by=0.1), 100)
+
+n_cores <- detectCores() - 1
+cl <- makeCluster(n_cores, type='FORK')
+sim_results <- as.data.frame(t(parSapply(cl, alphas, sim.rep)))
+stopCluster(cl)
+
+ggplot(sim_results, aes(x = prevalence, y = ratio.g)) +
+  geom_point(alpha = 0.1) +
+  geom_smooth(method = 'loess', formula=y~x) +
+  labs(y='Bias Ratio',
+       x='Phenotype Prevalence',
+       title='PD bias when weighting max sibling phenotype by prevalence') +
+  scale_y_continuous(limits=c(-10, 10)) +
+  theme_bw()
+```
+
+This appears to perform similarly to scaling by a flat 0.5, with the added complication of performing much worse at low phenotypic prevalence. 
+
+## Only use information you are certain of
+
+Here we leverage the asymmetry of the information provided by the motivating case. We have imperfect information when $\max(Y_1,Y_2) = 1$, but when $\max(Y_1,Y_2) = 0$, we know that $Y_1 = Y_2 = 0$. In this simulation, we only consider families where $\max(Y_1,Y_2) = 0$. This makes the phenotype difference:
+
+$$ PD = Y_0 - 0 = Y_0 $$
+
+```{r prev_sim_0, cache=TRUE}
+sim.rep <- function(alpha){
+  d_sim <- sim.data(alpha=alpha,
+                      beta=sqrt(0.0001), 
+                      gamma_1=sqrt(0.35), 
+                      gamma_2=sqrt(0.6499))
+    
+  prevalence <- mean(d_sim$Y0)
+  
+  fe_d <- data.frame(Y = c(d_sim$Y0, d_sim$Y1, d_sim$Y2),
+                     g = c(d_sim$g0, d_sim$g1, d_sim$g2),
+                     family = rep(1:nrow(d_sim), 3)) %>% 
+    group_by(family) %>% 
+    mutate(Y_bar = mean(Y),
+           g_bar = mean(g)) %>% 
+    ungroup() %>% 
+    transmute(Y = Y - Y_bar,
+              g = g - g_bar)
+      
+  m_ols <- lm(Y0 ~ g0, data=d_sim)
+  ols_est <- coef(m_ols)[2]
+
+  m_sim_fe <- lm(Y ~ g, data = fe_d)
+  fe_est <- coef(m_sim_fe)[2]
+  
+  d_sim <- d_sim %>%  
+    mutate(keep = Y1 + Y2) %>% 
+    filter(keep == 0) %>% 
+    transmute(g = 0.5 * g0,
+              delta_max = Y0 - max(Y1, Y2))
+  m_sim_pd <- lm(delta_max ~ g, data = d_sim)
+  max_est <- coef(m_sim_pd)[2]
+    
+  ratio <- (max_est - fe_est)/(ols_est - fe_est)
+  output <- c(alpha=alpha, prevalence=prevalence, ratio=ratio)
+  return(output)
+}
+
+alphas <- rep(seq(-4, -1, by=0.1), 100)
+
+n_cores <- detectCores() - 1
+cl <- makeCluster(n_cores, type='FORK')
+sim_results <- as.data.frame(t(parSapply(cl, alphas, sim.rep)))
+stopCluster(cl)
+
+ggplot(sim_results, aes(x = prevalence, y = ratio.g)) +
+  geom_point(alpha = 0.1) +
+  geom_smooth(method = 'loess', formula=y~x) +
+  labs(y='Bias Ratio',
+       x='Phenotype Prevalence',
+       title='PD bias when only using families both siblings have phenotype zero') +
+  scale_y_continuous(limits=c(-10, 10)) +
+  theme_bw()
+```
+
+
+Here we see this adjustment outperforms the adjustments to the max phenotype, but still retains significant bias. Additionally, this picks up the issue of having the sample size shrink as phenotype prevalence increases.
+
+# Conclusions
+
+The information asymmetry created by asking questions of the "do any of your siblings" form creates problems for estimation of genetic effects when only a single phenotype is observed. Multiple potential corrections are explored, but none perform better than vanilla OLS that ignores sibling data. Additionally, the bias ratio we estimate is highly variable in regions of low phenotype prevalence, which is the sweet spot for many of the dichotomous phenotypes in studies like UKB. 
+
