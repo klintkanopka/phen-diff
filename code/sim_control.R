@@ -52,7 +52,7 @@ control <- data.frame(
 
 cl <- makeCluster(20)
 clusterSetRNGStream(cl, 1337)
-clusterExport(cl, c('sim.reg', 'sim.data'))
+clusterExport(cl, c('sim.reg', 'sim.allele.cont'))
 sim_out <- clusterMap(cl, sim.reg,
                       b=control$b, N=control$N, p=control$p,
                       gamma_1=control$gamma_1, gamma_2=control$gamma_2,
