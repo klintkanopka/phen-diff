@@ -74,9 +74,17 @@ saveRDS(results, 'code/sim_data/sim_allele_bias.rds')
 results %>%
   select(N, b, case, b_pd, b_fe, b_ols) %>%
   pivot_longer(starts_with('b_'), names_to='model', values_to='estimate') %>%
+  mutate(case = factor(case, levels=c('None', 'Low', 'High')),
+         mod = case_when(model == 'b_fe' ~ 'Fixed Effects',
+                         model == 'b_ols' ~ 'OLS',
+                         model == 'b_pd' ~ 'Phenotype Differences'),
+         mod = factor(mod, levels=c('OLS', 'Fixed Effects', 'Phenotype Differences'))) %>%
   ggplot(aes(x=b, y=estimate)) +
   geom_point(color='grey', alpha=0.025) +
-  geom_smooth(aes(color=model), method=lm, formula=y~x) +
+  geom_smooth(aes(color=mod), method=lm, formula=y~x) +
   geom_abline(aes(slope=1, intercept=0), lty=2, color='black') +
-  facet_grid(model~case) +
+  facet_grid(mod~case) +
+  labs(x='Simulated Beta', y='Estimate',
+       title='Bias in Beta estimates by level of gene-environment correlation and estimator',
+       color='Estimator') +
   theme_bw()
