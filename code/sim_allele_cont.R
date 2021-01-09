@@ -4,7 +4,7 @@
 #
 # inputs:
 #   N - number of sibling triplets
-#   rho_g - genetic correlation in parent's generation (not implemented)
+#   rho_g - genetic correlation in parent's generation (approximate)
 #   p_allele - allele prevalence in parent's generation
 #   alpha - mean phenotype for genotype 0
 #   beta - magnitude of direct genetic effect
@@ -19,13 +19,14 @@
 #     Y0/Y1/Y2 - sibling phenotypes
 
 
-sim.allele.cont <- function(N=1e5, rho_g=0.3, p_allele=0.3,
+sim.allele.cont <- function(N=1e5, rho_g=0, p_allele=0.3,
                             alpha=0, beta=0.04,
                             gamma_1=sqrt(0.35), gamma_2=sqrt(0.649)){
 
   sim.genes <- function(N=N, rho=rho, rho_g=rho_g, p_allele=p_allele){
+
     g_m <- rbinom(n=N, size=2, prob=p_allele)
-    g_p <- rbinom(n=N, size=2, prob=p_allele)
+    g_p <- rbinom(n=N, size=2, prob=(1-rho_g)*p_allele + rho_g*(g_m/2))
 
     out <- data.frame(g_m = g_m,
                       g_p = g_p,
