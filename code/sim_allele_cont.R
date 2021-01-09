@@ -4,7 +4,8 @@
 #
 # inputs:
 #   N - number of sibling triplets
-#   rho_g - genetic correlation in parent's generation (approximate)
+#   rho_g - gene-(familyl)environment correlation (approximate)
+#   rho_p - genetic correlation in parent's generation (approximate)
 #   p_allele - allele prevalence in parent's generation
 #   alpha - mean phenotype for genotype 0
 #   beta - magnitude of direct genetic effect
@@ -19,14 +20,15 @@
 #     Y0/Y1/Y2 - sibling phenotypes
 
 
-sim.allele.cont <- function(N=1e5, rho_g=0, p_allele=0.3,
+sim.allele.cont <- function(N=1e5, rho_g=0.3, rho_p=0, p_allele=0.3,
                             alpha=0, beta=0.04,
                             gamma_1=sqrt(0.35), gamma_2=sqrt(0.649)){
 
-  sim.genes <- function(N=N, rho=rho, rho_g=rho_g, p_allele=p_allele){
+  sim.genes <- function(N=N, rho=rho, rho_g=rho_g,
+                        rho_p=rho_p, p_allele=p_allele){
 
     g_m <- rbinom(n=N, size=2, prob=p_allele)
-    g_p <- rbinom(n=N, size=2, prob=(1-rho_g)*p_allele + rho_g*(g_m/2))
+    g_p <- rbinom(n=N, size=2, prob=((1-rho_p)*p_allele + rho_p*(g_m/2)))
 
     out <- data.frame(g_m = g_m,
                       g_p = g_p,
@@ -34,10 +36,16 @@ sim.allele.cont <- function(N=1e5, rho_g=0, p_allele=0.3,
                       g1 = rbinom(N, 1, g_m/2) + rbinom(N, 1, g_p/2),
                       g2 = rbinom(N, 1, g_m/2) + rbinom(N, 1, g_p/2),
                       eps_fam = rnorm(N))
+
+    a <- rho_g/(1-rho_g^2)
+    z <- a*(out$g0-mean(out$g0))/sd(out$g0) + rnorm(N)
+
+    out$eps_fam <- (z - mean(z))/sd(z)
+
     return(out)
   }
 
-  d <- sim.genes(N=N, rho=rho, rho_g=rho_g, p_allele=p_allele)
+  d <- sim.genes(N=N, rho_g=rho_g, rho_p=rho_p, p_allele=p_allele)
 
   d$Y0 <- alpha + beta*d$g0 + gamma_1*d$eps_fam + gamma_2*rnorm(N)
   d$Y1 <- alpha + beta*d$g1 + gamma_1*d$eps_fam + gamma_2*rnorm(N)
