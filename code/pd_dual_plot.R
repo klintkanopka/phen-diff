@@ -97,3 +97,4 @@ p2 <- ggplot(d2, aes(x = N_PD, y=N_FE, color=Phi)) +
   theme_bw()
 
 multiplot(p1, p2, cols=2)
+ggsave('figs/standard_error_plots.png', width=8, height=6)
