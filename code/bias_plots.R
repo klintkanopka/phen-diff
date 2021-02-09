@@ -1,6 +1,6 @@
 library(tidyverse)
 
-setwd('~/projects/phen-diff')
+results <- readRDS('code/sim_data/sim_allele_bias.rds')
 
 results %>%
   select(N, b, case, b_pd, b_fe, b_ols) %>%
